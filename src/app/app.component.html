@@ -30,17 +30,20 @@
     </section>
 
     <nav class="workspace-nav" aria-label="工作区">
-      <button [class.active]="activeView === 'compose'" (click)="activeView = 'compose'">
+      <button [class.active]="activeView === 'compose'" (click)="backToCurrentRelease(); activeView = 'compose'">
         <span>01</span><strong>通知编写</strong><small>事件要素与多语言正文</small>
       </button>
-      <button [class.active]="activeView === 'checks'" (click)="activeView = 'checks'">
+      <button [class.active]="activeView === 'checks'" (click)="backToCurrentRelease(); activeView = 'checks'">
         <span>02</span><strong>发布前检查</strong><small>必填、术语、时间与版本</small>
       </button>
-      <button [class.active]="activeView === 'review'" (click)="activeView = 'review'">
+      <button [class.active]="activeView === 'review'" (click)="backToCurrentRelease(); activeView = 'review'">
         <span>03</span><strong>角色审阅</strong><small>逐句讨论与责任确认</small>
       </button>
-      <button [class.active]="activeView === 'versions'" (click)="activeView = 'versions'">
-        <span>04</span><strong>锁定与比较</strong><small>冻结、紧急修订、差异</small>
+      <button [class.active]="activeView === 'release'" (click)="activeView = 'release'">
+        <span>04</span><strong>发布预演</strong><small>分批排程、阻断与重试</small>
+      </button>
+      <button [class.active]="activeView === 'versions'" (click)="backToCurrentRelease(); activeView = 'versions'">
+        <span>05</span><strong>锁定与比较</strong><small>冻结、紧急修订、差异</small>
       </button>
     </nav>
 
@@ -149,7 +152,8 @@
             <div class="done"><span>1</span><p><strong>内容起草</strong>自动保存到本机</p></div>
             <div [class.done]="blockingChecks.length === 0"><span>2</span><p><strong>发布检查</strong>必须清除阻断项</p></div>
             <div [class.done]="allReviewsApproved"><span>3</span><p><strong>角色确认</strong>编辑、法务、翻译、发布人</p></div>
-            <div [class.done]="isLocked"><span>4</span><p><strong>冻结发布</strong>生成不可变快照</p></div>
+            <div [class.done]="releaseSummary.success > 0"><span>4</span><p><strong>发布预演</strong>分批排程与失败阻断</p></div>
+            <div [class.done]="isLocked"><span>5</span><p><strong>冻结发布</strong>生成不可变快照</p></div>
           </nb-card-body>
         </nb-card>
       </aside>
@@ -237,6 +241,119 @@
       </div>
     </section>
 
+    <section *ngIf="activeView === 'release'" class="view-section">
+      <div class="section-heading release-heading">
+        <div>
+          <span class="eyebrow">发布预演</span>
+          <h2>{{ isHistoryPreview ? '从历史版本重建预演' : '分批排程与模拟发送' }}</h2>
+          <p>按严重程度提前量生成各渠道计划；正文超长自动连续拆批，缺少翻译只阻断依赖它的渠道。</p>
+        </div>
+        <div class="release-controls" *ngIf="!isHistoryPreview">
+          <nb-select [(ngModel)]="simulationOutcome" status="basic">
+            <nb-option value="success">下一批模拟成功</nb-option>
+            <nb-option value="failure">下一批模拟失败</nb-option>
+          </nb-select>
+          <button nbButton status="primary" (click)="runNextBatch()" [disabled]="!nextRunnableBatch">执行/重试下一批</button>
+          <button nbButton status="success" (click)="runRemainingBatches()" [disabled]="!nextRunnableBatch">一键跑通</button>
+          <button nbButton status="warning" (click)="resetReleaseRun()">重置结果</button>
+          <button nbButton status="basic" (click)="rebuildReleasePlan()" [disabled]="isLocked">重新生成</button>
+        </div>
+        <button *ngIf="isHistoryPreview" nbButton status="primary" (click)="backToCurrentRelease()">返回当前草稿预演</button>
+      </div>
+
+      <nb-alert status="info" *ngIf="isHistoryPreview">
+        当前只用于查看 {{ historyPreviewVersion?.version }} 的重建结果；模拟发送不会写入当前草稿。历史版本已保存的成功记录仍会原样保留。
+      </nb-alert>
+
+      <div class="release-summary-cards">
+        <div><strong>{{ releaseSummary.total }}</strong><span>批次总数</span></div>
+        <div class="success"><strong>{{ releaseSummary.success }}</strong><span>成功记录</span></div>
+        <div class="failed"><strong>{{ releaseSummary.failed }}</strong><span>失败批次</span></div>
+        <div><strong>{{ releaseSummary.pending }}</strong><span>待发送</span></div>
+        <div class="blocked"><strong>{{ releaseSummary.blocked }}</strong><span>渠道阻断</span></div>
+      </div>
+
+      <div class="release-layout">
+        <div class="main-column">
+          <nb-card class="panel" *ngFor="let group of releaseGroups">
+            <nb-card-header class="release-card-header">
+              <div>
+                <span class="section-kicker">{{ group.channel }} · {{ group.leadMinutes }} 分钟提前量</span>
+                <h3>计划 {{ formatDateTime(group.scheduledAt) }}</h3>
+              </div>
+              <span class="release-status" [class]="groupStatus(group)">{{ groupStatusLabel(group) }}</span>
+            </nb-card-header>
+            <nb-card-body class="release-batches">
+              <article *ngFor="let batch of group.batches; trackBy: trackById" [class]="batch.status">
+                <header>
+                  <div><strong>{{ batch.localeName }}</strong><span>第 {{ batch.part }}/{{ batch.totalParts }} 批</span></div>
+                  <b>{{ batch.status === 'success' ? '成功' : batch.status === 'failed' ? '失败' : batch.status === 'blocked' ? '阻断' : batch.status === 'sending' ? '发送中' : '待发' }}</b>
+                </header>
+                <pre>{{ batch.blockingReason || batch.content }}</pre>
+                <footer>
+                  <div>
+                    <span>计划：{{ formatDateTime(batch.scheduledAt) }}</span>
+                    <span *ngIf="batch.dispatchedAt">实际：{{ formatDateTime(batch.dispatchedAt) }}</span>
+                    <span *ngIf="batch.attemptCount">重试/尝试 {{ batch.attemptCount }} 次</span>
+                    <em *ngIf="batch.recordId">成功记录 {{ batch.recordId }}</em>
+                  </div>
+                  <button
+                    *ngIf="!isHistoryPreview"
+                    nbButton
+                    size="tiny"
+                    [status]="simulationOutcome === 'failure' ? 'warning' : 'success'"
+                    [disabled]="!canRunBatch(batch)"
+                    (click)="simulateBatch(batch, simulationOutcome)"
+                  >{{ batch.status === 'failed' ? '重试本批' : batch.attemptCount ? '再次模拟' : '模拟发送' }}</button>
+                </footer>
+                <p class="failure-copy" *ngIf="batch.failureReason">{{ batch.failureReason }}</p>
+              </article>
+            </nb-card-body>
+          </nb-card>
+        </div>
+
+        <aside class="release-side">
+          <nb-card class="panel">
+            <nb-card-header><div><span class="section-kicker">排程基准</span><h3>严重程度提前量</h3></div></nb-card-header>
+            <nb-card-body>
+              <dl class="schedule-meta">
+                <dt>事件时间</dt><dd>{{ formatDateTime(releaseSource.eventAt) }}</dd>
+                <dt>严重程度</dt><dd>{{ releaseSource.severity }}</dd>
+                <dt>排程基准</dt><dd>{{ formatDateTime(activeReleasePlan.anchorAt) }}</dd>
+                <dt>生成时间</dt><dd>{{ formatDateTime(activeReleasePlan.generatedAt) }}</dd>
+              </dl>
+              <div class="lead-table">
+                <div><span>渠道</span><span *ngFor="let level of severities">{{ level }}</span></div>
+                <div *ngFor="let channel of orderedChannels(channelOptions)">
+                  <span>{{ channel }}</span>
+                  <span *ngFor="let level of severities" [class.hot]="releaseLeadMinutes[level][channel] === 30">{{ releaseLeadMinutes[level][channel] }}′</span>
+                </div>
+              </div>
+              <p class="muted">红色短信 30 分钟、广播 15 分钟、网站 10 分钟；其他级别沿用应急默认提前量。</p>
+            </nb-card-body>
+          </nb-card>
+
+          <nb-card class="panel">
+            <nb-card-header><div><span class="section-kicker">渠道依赖</span><h3>语言阻断矩阵</h3></div></nb-card-header>
+            <nb-card-body class="dependency-matrix">
+              <div class="matrix-head"><span>渠道</span><span *ngFor="let locale of locales">{{ locale.id.slice(0, 2).toUpperCase() }}</span></div>
+              <div *ngFor="let channel of orderedChannels(channelOptions)">
+                <span>{{ channel }}</span>
+                <label *ngFor="let locale of locales">
+                  <nb-checkbox
+                    [checked]="channelLocales(channel).includes(locale.id)"
+                    [disabled]="isLocked || isHistoryPreview || !releaseSource.channels.includes(channel)"
+                    (checkedChange)="toggleChannelLocale(channel, locale.id, $event)"
+                  ></nb-checkbox>
+                </label>
+              </div>
+              <p class="muted">取消某语言依赖后，该语言缺失只阻断其他勾选渠道；未选择的渠道不会生成批次。</p>
+            </nb-card-body>
+          </nb-card>
+        </aside>
+      </div>
+    </section>
+
     <section *ngIf="activeView === 'versions'" class="view-section">
       <div class="section-heading">
         <div><span class="eyebrow">版本控制</span><h2>冻结、比较与紧急修订</h2><p>最终锁定版本不可覆盖；紧急修订会从当前版本继续，并保留完整历史。</p></div>
@@ -252,7 +369,12 @@
             <nb-card-body class="timeline">
               <article *ngFor="let version of draft.versions; let last = last" [class.current]="last">
                 <span></span>
-                <div><b>{{ version.version }}</b><strong>{{ version.label }}</strong><p>{{ formatDateTime(version.createdAt) }} · {{ version.channels.length }} 个渠道</p><small *ngIf="version.emergency">紧急修订</small></div>
+                <div>
+                  <b>{{ version.version }}</b><strong>{{ version.label }}</strong>
+                  <p>{{ formatDateTime(version.createdAt) }} · {{ version.channels.length }} 个渠道 · {{ (version.requiredLocales || draft.requiredLocales).length }} 种语言</p>
+                  <small *ngIf="version.emergency">紧急修订</small>
+                  <button nbButton size="tiny" status="basic" (click)="previewHistoryVersion(version)">从此版本重建预演</button>
+                </div>
               </article>
             </nb-card-body>
           </nb-card>
