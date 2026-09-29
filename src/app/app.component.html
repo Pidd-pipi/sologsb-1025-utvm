@@ -36,11 +36,14 @@
       <button [class.active]="activeView === 'checks'" (click)="activeView = 'checks'">
         <span>02</span><strong>发布前检查</strong><small>必填、术语、时间与版本</small>
       </button>
+      <button [class.active]="activeView === 'rehearsal'" (click)="activeView = 'rehearsal'">
+        <span>03</span><strong>发布预演</strong><small>批次、计划时间与重试</small>
+      </button>
       <button [class.active]="activeView === 'review'" (click)="activeView = 'review'">
-        <span>03</span><strong>角色审阅</strong><small>逐句讨论与责任确认</small>
+        <span>04</span><strong>角色审阅</strong><small>逐句讨论与责任确认</small>
       </button>
       <button [class.active]="activeView === 'versions'" (click)="activeView = 'versions'">
-        <span>04</span><strong>锁定与比较</strong><small>冻结、紧急修订、差异</small>
+        <span>05</span><strong>锁定与比较</strong><small>冻结、紧急修订、差异</small>
       </button>
     </nav>
 
@@ -188,6 +191,126 @@
       </div>
     </section>
 
+    <section *ngIf="activeView === 'rehearsal'" class="view-section rehearsal-section">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">发布预演</span>
+          <h2>按提前量编排渠道批次并模拟发送</h2>
+          <p>红色预警下短信提前 30 分钟、广播类提前 15 分钟、网站类提前 10 分钟；超长正文会连续拆分。</p>
+        </div>
+        <div class="rehearsal-actions">
+          <button nbButton status="primary" (click)="runRehearsal()" [disabled]="rehearsalRunning || rehearsalComplete">
+            {{ rehearsalRunning ? '正在模拟发送…' : rehearsalActionLabel }}
+          </button>
+          <button nbButton status="basic" (click)="resetRehearsalResults()" [disabled]="rehearsalRunning || (!rehearsalSentCount && !rehearsalFailedCount)">清空发送结果</button>
+        </div>
+      </div>
+
+      <div class="rehearsal-summary">
+        <article><span>计划批次</span><strong>{{ rehearsal.batches.length }}</strong></article>
+        <article class="ok"><span>成功记录</span><strong>{{ rehearsalSentCount }}</strong></article>
+        <article class="danger"><span>失败批次</span><strong>{{ rehearsalFailedCount }}</strong></article>
+        <article class="blocked"><span>语言阻断</span><strong>{{ rehearsalBlockedCount }}</strong></article>
+        <article><span>待发送</span><strong>{{ rehearsalPendingCount }}</strong></article>
+      </div>
+
+      <nb-alert status="warning" *ngIf="rehearsalSourceLabel !== '当前草稿'">
+        当前预演从 {{ rehearsalSourceLabel }} 重建，仅用于查看历史批次；当前草稿正文未被覆盖。
+        <button nbButton size="tiny" status="basic" (click)="useDraftRehearsal()">回到当前草稿预演</button>
+      </nb-alert>
+
+      <div class="rehearsal-layout">
+        <div class="main-column">
+          <nb-card class="panel">
+            <nb-card-header>
+              <div><span class="section-kicker">提前量规则</span><h3>{{ draft.severity }}预警 · 发送时间轴</h3></div>
+              <span class="status-pill">计划生成于 {{ formatDateTime(rehearsal.generatedAt) }}</span>
+            </nb-card-header>
+            <nb-card-body>
+              <div class="lead-grid">
+                <article *ngFor="let group of channelGroups">
+                  <strong>{{ group === 'sms' ? '短信' : group === 'broadcast' ? '广播 / 大屏 / 喇叭' : '网站 / 政务新媒体' }}</strong>
+                  <b>{{ leadForGroup(group) }} 分钟</b>
+                  <p>{{ draft.eventAt ? formatDateTime(draft.eventAt) : '未设置事件时间' }} 前发送</p>
+                </article>
+              </div>
+            </nb-card-body>
+          </nb-card>
+
+          <nb-card class="panel" *ngFor="let model of rehearsalChannels">
+            <nb-card-header class="channel-header">
+              <div>
+                <span class="section-kicker">{{ model.groupLabel }}</span>
+                <h3>{{ model.channel }}</h3>
+                <p>计划 {{ formatDateTime(model.plannedAt) }} · 提前 {{ model.leadMinutes }} 分钟 · {{ model.batches.length }} 批</p>
+              </div>
+              <div class="channel-header-side">
+                <span class="batch-status" [class]="model.status">{{ rehearsalStatusName(model.status) }}</span>
+                <label class="fault-toggle">
+                  <nb-checkbox [checked]="isFaultChannel(model.channel)" (checkedChange)="toggleFaultChannel(model.channel, $event)">模拟该渠道下一次失败</nb-checkbox>
+                </label>
+              </div>
+            </nb-card-header>
+            <nb-card-body>
+              <nb-alert status="danger" *ngIf="model.status === 'blocked'">{{ model.blockedReason }}</nb-alert>
+              <nb-alert status="warning" *ngIf="model.waitingReason">{{ model.waitingReason }}</nb-alert>
+
+              <div class="dependency-row">
+                <span>依赖语言</span>
+                <label *ngFor="let locale of locales">
+                  <nb-checkbox [disabled]="isLocked || rehearsalRunning" [checked]="channelDependencyLocales(model.channel).includes(locale.id)" (checkedChange)="toggleChannelDependency(model.channel, locale.id, $event)">{{ locale.name }}</nb-checkbox>
+                </label>
+              </div>
+
+              <div class="batch-list">
+                <article *ngFor="let batch of model.batches; trackBy: trackById" [class]="batch.status">
+                  <header>
+                    <div><b>{{ batch.languageName }}</b><span>第 {{ batch.sequence }} / {{ batch.total }} 批</span></div>
+                    <em>{{ rehearsalStatusName(batch.status) }}</em>
+                  </header>
+                  <p>{{ batch.content || batch.blockedReason }}</p>
+                  <footer>
+                    <span>计划：{{ formatDateTime(batch.plannedAt) }}</span>
+                    <span *ngIf="batch.sentAt">成功：{{ formatDateTime(batch.sentAt) }}</span>
+                    <span class="danger-text" *ngIf="batch.failureReason">{{ batch.failureReason }}</span>
+                  </footer>
+                  <div class="attempt-log" *ngIf="batch.attempts.length">
+                    <small *ngFor="let attempt of batch.attempts; trackBy: trackById">
+                      {{ attempt.ok ? '成功' : '失败' }} · {{ formatDateTime(attempt.finishedAt) }}<ng-container *ngIf="attempt.reason"> · {{ attempt.reason }}</ng-container>
+                    </small>
+                  </div>
+                </article>
+              </div>
+            </nb-card-body>
+          </nb-card>
+
+          <nb-alert status="info" *ngIf="!rehearsalChannels.length">请先选择至少一个发布渠道。</nb-alert>
+        </div>
+
+        <aside>
+          <nb-card class="panel">
+            <nb-card-header><div><span class="section-kicker">预演规则</span><h3>阻断与重试</h3></div></nb-card-header>
+            <nb-card-body class="rule-list">
+              <p><strong>语言只影响依赖渠道</strong>缺少某语言时，仅阻断勾选该语言的渠道。</p>
+              <p><strong>失败即停止推进</strong>前序渠道失败后，后续未开始渠道继续显示“待发送”。</p>
+              <p><strong>重试幂等</strong>已成功批次不会再次生成成功记录，只重试失败批次并继续后续队列。</p>
+              <p><strong>长文连续发送</strong>短信 70 字拆分，广播和网页按渠道容量拆分并标注批次序号。</p>
+            </nb-card-body>
+          </nb-card>
+
+          <nb-card class="panel">
+            <nb-card-header><div><span class="section-kicker">审计留痕</span><h3>预演事件</h3></div><span class="count-pill">{{ rehearsal.events.length }}</span></nb-card-header>
+            <nb-card-body class="event-list">
+              <article *ngFor="let event of rehearsal.events | slice:0:12; trackBy: trackById">
+                <span [class.ok]="event.ok === true" [class.fail]="event.ok === false"></span>
+                <div><p>{{ event.message }}</p><time>{{ formatDateTime(event.createdAt) }}</time></div>
+              </article>
+            </nb-card-body>
+          </nb-card>
+        </aside>
+      </div>
+    </section>
+
     <section *ngIf="activeView === 'review'" class="view-section">
       <div class="section-heading">
         <div><span class="eyebrow">多人协作</span><h2>分角色审阅与逐句讨论</h2><p>审阅意见绑定具体句子，处理结果随草稿保存在当前浏览器。</p></div>
@@ -252,7 +375,12 @@
             <nb-card-body class="timeline">
               <article *ngFor="let version of draft.versions; let last = last" [class.current]="last">
                 <span></span>
-                <div><b>{{ version.version }}</b><strong>{{ version.label }}</strong><p>{{ formatDateTime(version.createdAt) }} · {{ version.channels.length }} 个渠道</p><small *ngIf="version.emergency">紧急修订</small></div>
+                <div>
+                  <b>{{ version.version }}</b><strong>{{ version.label }}</strong>
+                  <p>{{ formatDateTime(version.createdAt) }} · {{ version.channels.length }} 个渠道</p>
+                  <small *ngIf="version.emergency">紧急修订</small>
+                  <button nbButton size="tiny" status="basic" (click)="rebuildFromVersion(version)">从此版本重建预演</button>
+                </div>
               </article>
             </nb-card-body>
           </nb-card>
@@ -284,7 +412,11 @@
             <nb-card-body class="version-summary">
               <article *ngFor="let version of draft.versions">
                 <div><span>{{ version.version }}</span><h3>{{ version.title }}</h3><p>{{ version.note }}</p></div>
-                <dl><dt>严重程度</dt><dd>{{ version.severity }}</dd><dt>失效</dt><dd>{{ formatDateTime(version.expiresAt) }}</dd></dl>
+                <dl>
+                  <dt>严重程度</dt><dd>{{ version.severity }}</dd>
+                  <dt>失效</dt><dd>{{ formatDateTime(version.expiresAt) }}</dd>
+                  <dt>预演批次</dt><dd>{{ version.rehearsal ? version.rehearsal.batches.length : '重建时生成' }}</dd>
+                </dl>
               </article>
             </nb-card-body>
           </nb-card>

@@ -17,10 +17,12 @@ import {
   NbToastrService
 } from '@nebular/theme';
 
-type WorkspaceView = 'compose' | 'checks' | 'review' | 'versions';
+type WorkspaceView = 'compose' | 'checks' | 'rehearsal' | 'review' | 'versions';
 type ReviewStatus = 'pending' | 'approved' | 'changes';
 type NoticeStatus = 'draft' | 'in-review' | 'locked';
 type CheckLevel = 'error' | 'warning' | 'info';
+type ChannelGroup = 'sms' | 'broadcast' | 'web';
+type RehearsalStatus = 'pending' | 'sent' | 'failed' | 'blocked';
 
 interface LanguageVersion {
   id: string;
@@ -50,6 +52,51 @@ interface RoleReview {
   note: string;
 }
 
+interface RehearsalAttempt {
+  id: string;
+  batchId: string;
+  startedAt: string;
+  finishedAt: string;
+  ok: boolean;
+  reason?: string;
+}
+
+interface RehearsalBatch {
+  id: string;
+  channel: string;
+  channelGroup: ChannelGroup;
+  locale: string;
+  languageName: string;
+  title: string;
+  content: string;
+  sequence: number;
+  total: number;
+  plannedAt: string;
+  leadMinutes: number;
+  status: RehearsalStatus;
+  blockedReason?: string;
+  sentAt?: string;
+  failureReason?: string;
+  attempts: RehearsalAttempt[];
+}
+
+interface RehearsalEvent {
+  id: string;
+  type: 'plan-generated' | 'send-result' | 'reset' | 'rebuild';
+  message: string;
+  createdAt: string;
+  ok?: boolean;
+}
+
+interface RehearsalState {
+  signature: string;
+  generatedAt: string;
+  source: string;
+  channelLocales: Record<string, string[]>;
+  batches: RehearsalBatch[];
+  events: RehearsalEvent[];
+}
+
 interface VersionSnapshot {
   id: string;
   label: string;
@@ -62,6 +109,9 @@ interface VersionSnapshot {
   effectiveAt: string;
   expiresAt: string;
   channels: string[];
+  requiredLocales: string[];
+  channelLocales?: Record<string, string[]>;
+  rehearsal?: RehearsalState;
   languages: LanguageVersion[];
   note: string;
   emergency: boolean;
@@ -74,6 +124,8 @@ interface NoticeDraft {
   severity: string;
   scope: string;
   channels: string[];
+  channelLocales: Record<string, string[]>;
+  rehearsal: RehearsalState;
   eventAt: string;
   effectiveAt: string;
   expiresAt: string;
@@ -115,12 +167,241 @@ interface NoticeTemplate {
   body: Record<string, string>;
 }
 
+interface ChannelSpec {
+  group: ChannelGroup;
+  capacity: number;
+}
+
+interface RehearsalChannelModel {
+  channel: string;
+  group: ChannelGroup;
+  groupLabel: string;
+  leadMinutes: number;
+  plannedAt: string;
+  locales: string[];
+  batches: RehearsalBatch[];
+  status: RehearsalStatus;
+  blockedReason?: string;
+  waitingReason?: string;
+}
+
 const STORAGE_KEY = 'sologsb-1025-emergency-notice-v1';
+
+const LOCALE_OPTIONS = [
+  { id: 'zh-CN', name: '简体中文' },
+  { id: 'en', name: 'English' },
+  { id: 'ja', name: '日本語' },
+  { id: 'ko', name: '한국어' },
+  { id: 'es', name: 'Español' }
+];
+
+const CHANNEL_SPECS: Record<string, ChannelSpec> = {
+  短信: { group: 'sms', capacity: 70 },
+  广播: { group: 'broadcast', capacity: 300 },
+  社区大屏: { group: 'broadcast', capacity: 500 },
+  应急喇叭: { group: 'broadcast', capacity: 200 },
+  政务新媒体: { group: 'web', capacity: 2000 },
+  网站: { group: 'web', capacity: 5000 }
+};
+
+const GROUP_LABELS: Record<ChannelGroup, string> = {
+  sms: '短信',
+  broadcast: '广播 / 大屏 / 喇叭',
+  web: '网站 / 政务新媒体'
+};
+
+const LEAD_MINUTES: Record<string, Record<ChannelGroup, number>> = {
+  红色: { sms: 30, broadcast: 15, web: 10 },
+  橙色: { sms: 20, broadcast: 10, web: 5 },
+  黄色: { sms: 10, broadcast: 5, web: 0 },
+  蓝色: { sms: 5, broadcast: 0, web: 0 }
+};
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 function uid(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function stableId(prefix: string, value: unknown): string {
+  const text = JSON.stringify(value);
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  }
+  return `${prefix}-${Math.abs(hash).toString(36)}-${text.length.toString(36)}`;
+}
+
+function parseTime(value: string): number {
+  if (!value) return 0;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function localeDisplayName(locale: string): string {
+  return LOCALE_OPTIONS.find((item) => item.id === locale)?.name ?? locale;
+}
+
+function resolveChannelSpec(channel: string): ChannelSpec {
+  return CHANNEL_SPECS[channel] ?? { group: 'web', capacity: 1000 };
+}
+
+function groupLabel(group: ChannelGroup): string {
+  return GROUP_LABELS[group];
+}
+
+function leadForGroup(severity: string, group: ChannelGroup): number {
+  return LEAD_MINUTES[severity]?.[group] ?? 0;
+}
+
+function leadForChannel(severity: string, channel: string): number {
+  return leadForGroup(severity, resolveChannelSpec(channel).group);
+}
+
+function defaultChannelLocales(channels: string[], requiredLocales: string[]): Record<string, string[]> {
+  return Object.fromEntries(channels.map((channel) => {
+    if (channel === '社区大屏') return [channel, ['zh-CN', 'en']];
+    const group = resolveChannelSpec(channel).group;
+    if (group === 'web') return [channel, LOCALE_OPTIONS.filter((locale) => requiredLocales.includes(locale.id)).map((locale) => locale.id)];
+    return [channel, ['zh-CN']];
+  }));
+}
+
+function normalizeChannelLocales(
+  channels: string[],
+  requiredLocales: string[],
+  current?: Record<string, string[]>
+): Record<string, string[]> {
+  const defaults = defaultChannelLocales(channels, requiredLocales);
+  return Object.fromEntries(channels.map((channel) => [
+    channel,
+    current?.[channel]?.length ? current[channel] : defaults[channel]
+  ]));
+}
+
+function splitLongContent(text: string, capacity: number): string[] {
+  const normalized = text.trim();
+  if (!normalized) return [];
+  if (normalized.length <= capacity) return [normalized];
+
+  const markerReserve = 8;
+  const chunkSize = Math.max(10, capacity - markerReserve);
+  const chunks: string[] = [];
+  for (let start = 0; start < normalized.length; start += chunkSize) {
+    chunks.push(normalized.slice(start, start + chunkSize));
+  }
+  return chunks.map((chunk, index) => `${chunk}（${index + 1}/${chunks.length}）`);
+}
+
+type RehearsalInput = Pick<
+  NoticeDraft,
+  'eventAt' | 'severity' | 'channels' | 'requiredLocales' | 'channelLocales' | 'languages'
+>;
+
+function buildRehearsalPlan(
+  input: RehearsalInput,
+  options: { source: string; preserve?: RehearsalState; generatedAt?: string }
+): RehearsalState {
+  const channelLocales = normalizeChannelLocales(input.channels, input.requiredLocales, input.channelLocales);
+  const eventTime = parseTime(input.eventAt);
+  const orderedChannels = input.channels
+    .map((channel, originalIndex) => ({
+      channel,
+      originalIndex,
+      lead: leadForChannel(input.severity, channel)
+    }))
+    .sort((left, right) => right.lead - left.lead || left.originalIndex - right.originalIndex);
+
+  const signature = stableId('plan', {
+    eventAt: input.eventAt,
+    severity: input.severity,
+    channels: orderedChannels.map((item) => item.channel),
+    channelLocales,
+    languages: input.languages.map((language) => ({
+      id: language.id,
+      title: language.title,
+      body: language.body
+    }))
+  });
+
+  if (options.preserve?.signature === signature) return options.preserve;
+
+  const batches: RehearsalBatch[] = [];
+
+  orderedChannels.forEach(({ channel, lead }) => {
+    const spec = resolveChannelSpec(channel);
+    const plannedAt = eventTime ? new Date(eventTime - lead * 60_000).toISOString() : '';
+    const locales = channelLocales[channel] ?? [];
+    const blockers: string[] = [];
+
+    if (!eventTime) blockers.push('事件时间无效');
+    if (!locales.length) blockers.push('未配置依赖语言');
+
+    locales.forEach((locale) => {
+      const language = input.languages.find((item) => item.id === locale);
+      if (!language) blockers.push(`${localeDisplayName(locale)}翻译缺失`);
+      else if (!language.title.trim() || !language.body.trim()) blockers.push(`${language.name}标题或正文为空`);
+    });
+
+    const blockedReason = blockers.length ? `${Array.from(new Set(blockers)).join('、')}，${channel}暂不发送。` : undefined;
+
+    if (!locales.length) {
+      const id = stableId('batch', [channel, 'no-locale', plannedAt, lead, blockers.join('|')]);
+      const previous = options.preserve?.batches.find((batch) => batch.id === id);
+      batches.push(previous ?? {
+        id, channel, channelGroup: spec.group, locale: '', languageName: '未配置语言', title: '', content: '',
+        sequence: 1, total: 1, plannedAt, leadMinutes: lead, status: 'blocked', blockedReason, attempts: []
+      });
+      return;
+    }
+
+    locales.forEach((locale) => {
+      const language = input.languages.find((item) => item.id === locale);
+      const languageName = language?.name ?? localeDisplayName(locale);
+
+      if (!language || !language.title.trim() || !language.body.trim()) {
+        const id = stableId('batch', [channel, locale, 'missing', plannedAt, lead, blockers.join('|')]);
+        const previous = options.preserve?.batches.find((batch) => batch.id === id);
+        batches.push(previous ?? {
+          id, channel, channelGroup: spec.group, locale, languageName,
+          title: language?.title ?? `${languageName}翻译缺失`, content: '',
+          sequence: 1, total: 1, plannedAt, leadMinutes: lead, status: 'blocked', blockedReason, attempts: []
+        });
+        return;
+      }
+
+      const rawContent = spec.group === 'sms'
+        ? language.body.trim()
+        : `${language.title.trim()}\n\n${language.body.trim()}`;
+      const chunks = splitLongContent(rawContent, spec.capacity);
+
+      chunks.forEach((content, index) => {
+        const sequence = index + 1;
+        const id = stableId('batch', [
+          channel, locale, sequence, chunks.length, content, plannedAt, lead, input.severity
+        ]);
+        const previous = options.preserve?.batches.find((batch) => batch.id === id);
+        batches.push(previous ?? {
+          id, channel, channelGroup: spec.group, locale, languageName: language.name,
+          title: language.title, content, sequence, total: chunks.length, plannedAt, leadMinutes: lead,
+          status: blockedReason ? 'blocked' : 'pending', blockedReason, attempts: []
+        });
+      });
+    });
+  });
+
+  const generatedAt = options.generatedAt ?? new Date().toISOString();
+  const sourceLabel = options.source === 'draft' ? '当前草稿' : `历史版本 ${options.source}`;
+  const events = options.preserve ? [...options.preserve.events] : [];
+  events.push({
+    id: uid('rehearsal-event'),
+    type: options.source === 'draft' ? 'plan-generated' : 'rebuild',
+    createdAt: generatedAt,
+    message: `已根据${sourceLabel}生成发布预演计划，共 ${batches.length} 个批次。`
+  });
+  if (events.length > 80) events.splice(0, events.length - 80);
+
+  return { signature, generatedAt, source: options.source, channelLocales, batches, events };
 }
 
 function initialDraft(): NoticeDraft {
@@ -136,6 +417,7 @@ function initialDraft(): NoticeDraft {
     effectiveAt: '2026-09-23T09:00:00+08:00',
     expiresAt: '2026-09-24T08:00:00+08:00',
     channels: ['短信', '广播', '社区大屏'],
+    requiredLocales: ['zh-CN', 'en'],
     note: '发布范围覆盖滨海新区。',
     emergency: false,
     languages: [
@@ -177,13 +459,13 @@ function initialDraft(): NoticeDraft {
     ]
   };
 
-  return {
+  const draft = {
     id: 'notice-haiyan-2026',
     title: '台风“海燕”橙色预警及人员转移通知',
     eventType: '台风',
     severity: '橙色',
     scope: '滨海新区全区，重点为沿海街道',
-    channels: ['短信', '广播', '社区大屏', '政务新媒体'],
+    channels: ['短信', '广播', '社区大屏', '政务新媒体', '网站'],
     eventAt: '2026-09-25T07:30',
     effectiveAt: '2026-09-25T09:00',
     expiresAt: '2026-09-26T08:00',
@@ -222,7 +504,11 @@ function initialDraft(): NoticeDraft {
     version: '1.2.0-draft',
     emergencyRevision: false,
     updatedAt: new Date().toISOString()
-  };
+  } as NoticeDraft;
+
+  draft.channelLocales = defaultChannelLocales(draft.channels, draft.requiredLocales);
+  draft.rehearsal = buildRehearsalPlan(draft, { source: 'draft', generatedAt: draft.updatedAt });
+  return draft;
 }
 
 const TEMPLATES: NoticeTemplate[] = [
@@ -285,13 +571,8 @@ export class AppComponent implements OnInit {
   readonly eventTypes = ['台风', '暴雨', '地震', '公共卫生', '公共设施', '公共安全'];
   readonly severities = ['蓝色', '黄色', '橙色', '红色'];
   readonly channelOptions = ['短信', '广播', '社区大屏', '政务新媒体', '应急喇叭', '网站'];
-  readonly locales = [
-    { id: 'zh-CN', name: '简体中文' },
-    { id: 'en', name: 'English' },
-    { id: 'ja', name: '日本語' },
-    { id: 'ko', name: '한국어' },
-    { id: 'es', name: 'Español' }
-  ];
+  readonly locales = LOCALE_OPTIONS;
+  readonly channelGroups: ChannelGroup[] = ['sms', 'broadcast', 'web'];
   readonly bannedTerms = ['大概', '可能吧', '无需恐慌', '绝对不会', '保证安全'];
   readonly glossary = [
     { canonical: '立即', variants: ['马上', '赶紧'] },
@@ -312,6 +593,8 @@ export class AppComponent implements OnInit {
   lastSavedAt = '';
   history: NoticeDraft[] = [];
   future: NoticeDraft[] = [];
+  rehearsalRunning = false;
+  faultChannels: string[] = [];
 
   constructor(private readonly toastr: NbToastrService) {}
 
@@ -386,8 +669,8 @@ export class AppComponent implements OnInit {
       if (!this.draft.languages.some((language) => language.id === locale)) {
         const name = this.locales.find((item) => item.id === locale)?.name ?? locale;
         checks.push({
-          id: `missing-${locale}`, category: '语言完整性', level: 'error', title: `${name}版本缺失`,
-          detail: '该语言属于本次发布的必需语言，请添加并完成翻译。'
+          id: `missing-${locale}`, category: '语言完整性', level: 'warning', title: `${name}版本缺失`,
+          detail: `该语言只会阻断勾选依赖${name}的渠道；不要求该语言的渠道仍可预演和发送。`
         });
       }
     });
@@ -453,6 +736,81 @@ export class AppComponent implements OnInit {
 
   get hasIncompleteReviews(): boolean {
     return this.draft.reviews.some((review) => review.status !== 'approved');
+  }
+
+  get rehearsal(): RehearsalState {
+    return this.draft.rehearsal;
+  }
+
+  get rehearsalChannels(): RehearsalChannelModel[] {
+    const models = new Map<string, RehearsalChannelModel>();
+
+    this.rehearsal.batches.forEach((batch) => {
+      let model = models.get(batch.channel);
+      if (!model) {
+        model = {
+          channel: batch.channel,
+          group: batch.channelGroup,
+          groupLabel: groupLabel(batch.channelGroup),
+          leadMinutes: batch.leadMinutes,
+          plannedAt: batch.plannedAt,
+          locales: [],
+          batches: [],
+          status: 'pending'
+        };
+        models.set(batch.channel, model);
+      }
+      model.batches.push(batch);
+      if (batch.locale && !model.locales.includes(batch.locale)) model.locales.push(batch.locale);
+      if (batch.plannedAt && (!model.plannedAt || batch.plannedAt < model.plannedAt)) model.plannedAt = batch.plannedAt;
+    });
+
+    const result = [...models.values()];
+    result.forEach((model) => {
+      if (model.batches.every((batch) => batch.status === 'blocked')) model.status = 'blocked';
+      else if (model.batches.some((batch) => batch.status === 'failed')) model.status = 'failed';
+      else if (model.batches.every((batch) => batch.status === 'sent' || batch.status === 'blocked')) model.status = 'sent';
+      else model.status = 'pending';
+      model.blockedReason = model.batches.find((batch) => batch.blockedReason)?.blockedReason;
+    });
+    result.forEach((model, index) => {
+      if (model.status === 'pending' && result.slice(0, index).some((previous) => previous.status === 'failed')) {
+        const failedChannel = result.slice(0, index).find((previous) => previous.status === 'failed')?.channel;
+        model.waitingReason = `前序渠道“${failedChannel}”尚未重试成功，本渠道保持待发。`;
+      }
+    });
+    return result;
+  }
+
+  get rehearsalSentCount(): number {
+    return this.rehearsal.batches.filter((batch) => batch.status === 'sent').length;
+  }
+
+  get rehearsalFailedCount(): number {
+    return this.rehearsal.batches.filter((batch) => batch.status === 'failed').length;
+  }
+
+  get rehearsalBlockedCount(): number {
+    return this.rehearsal.batches.filter((batch) => batch.status === 'blocked').length;
+  }
+
+  get rehearsalPendingCount(): number {
+    return this.rehearsal.batches.filter((batch) => batch.status === 'pending').length;
+  }
+
+  get rehearsalComplete(): boolean {
+    return this.rehearsal.batches.length > 0
+      && !this.rehearsal.batches.some((batch) => batch.status === 'pending' || batch.status === 'failed');
+  }
+
+  get rehearsalActionLabel(): string {
+    return this.rehearsalFailedCount ? '重试失败渠道并继续' : '开始发布预演';
+  }
+
+  get rehearsalSourceLabel(): string {
+    if (this.rehearsal.source === 'draft') return '当前草稿';
+    const version = this.draft.versions.find((item) => item.id === this.rehearsal.source);
+    return version ? `历史版本 ${version.version}` : this.rehearsal.source;
   }
 
   isSentenceDiscussed(index: number): boolean {
@@ -574,6 +932,8 @@ export class AppComponent implements OnInit {
       id: uid('version'), label: '最终锁定版本', createdAt: new Date().toISOString(), version: this.nextVersion,
       title: this.draft.title, severity: this.draft.severity, scope: this.draft.scope, eventAt: this.draft.eventAt,
       effectiveAt: this.draft.effectiveAt, expiresAt: this.draft.expiresAt, channels: [...this.draft.channels],
+      requiredLocales: [...this.draft.requiredLocales], channelLocales: clone(this.draft.channelLocales),
+      rehearsal: clone(this.draft.rehearsal),
       languages: clone(this.draft.languages), note: '发布前检查通过并锁定。', emergency: false
     };
     this.commit((draft) => {
@@ -608,6 +968,158 @@ export class AppComponent implements OnInit {
     } else if (check.id === 'discussions') {
       this.activeView = 'review';
     }
+  }
+
+  leadForGroup(group: ChannelGroup): number {
+    return leadForGroup(this.draft.severity, group);
+  }
+
+  channelDependencyLocales(channel: string): string[] {
+    return this.rehearsal.channelLocales[channel] ?? [];
+  }
+
+  toggleChannelDependency(channel: string, locale: string, checked: boolean): void {
+    this.commit((draft) => {
+      const selected = draft.channelLocales[channel] ?? [];
+      draft.channelLocales[channel] = checked
+        ? [...new Set([...selected, locale])]
+        : selected.filter((item) => item !== locale);
+    });
+  }
+
+  isFaultChannel(channel: string): boolean {
+    return this.faultChannels.includes(channel);
+  }
+
+  toggleFaultChannel(channel: string, checked: boolean): void {
+    this.faultChannels = checked
+      ? [...new Set([...this.faultChannels, channel])]
+      : this.faultChannels.filter((item) => item !== channel);
+  }
+
+  rehearsalStatusName(status: RehearsalStatus): string {
+    return status === 'sent' ? '已发送' : status === 'failed' ? '发送失败' : status === 'blocked' ? '已阻断' : '待发送';
+  }
+
+  async runRehearsal(): Promise<void> {
+    if (this.rehearsalRunning || this.rehearsalComplete) return;
+
+    this.rehearsalRunning = true;
+    const state = clone(this.rehearsal);
+    let failureFound = state.batches.some((batch) => batch.status === 'failed');
+
+    for (const batch of state.batches) {
+      if (batch.status === 'blocked' || batch.status === 'sent') continue;
+      if (batch.status === 'pending' && failureFound) break;
+
+      const startedAt = new Date().toISOString();
+      await this.delay(140);
+      const willFail = this.faultChannels.includes(batch.channel);
+      const finishedAt = new Date().toISOString();
+      const attempt: RehearsalAttempt = {
+        id: uid('rehearsal-attempt'),
+        batchId: batch.id,
+        startedAt,
+        finishedAt,
+        ok: !willFail,
+        reason: willFail ? '模拟渠道网关返回失败，请检查接口后重试。' : undefined
+      };
+      batch.attempts.push(attempt);
+
+      if (willFail) {
+        batch.status = 'failed';
+        batch.failureReason = attempt.reason;
+        failureFound = true;
+        state.events.push({
+          id: uid('rehearsal-event'),
+          type: 'send-result',
+          createdAt: finishedAt,
+          ok: false,
+          message: `${batch.channel}第 ${batch.sequence}/${batch.total} 批发送失败，后续未开始渠道保持待发。`
+        });
+        this.syncRehearsal(state);
+        break;
+      }
+
+      batch.status = 'sent';
+      batch.sentAt = finishedAt;
+      batch.failureReason = undefined;
+      failureFound = false;
+      state.events.push({
+        id: uid('rehearsal-event'),
+        type: 'send-result',
+        createdAt: finishedAt,
+        ok: true,
+        message: `${batch.channel}第 ${batch.sequence}/${batch.total} 批已生成成功发送记录。`
+      });
+      this.syncRehearsal(state);
+    }
+
+    this.rehearsalRunning = false;
+    if (state.batches.some((batch) => batch.status === 'failed')) {
+      this.toastr.warning('已停止在失败点之后；后续未开始渠道仍为待发送。', '预演遇到失败');
+    } else if (state.batches.some((batch) => batch.status === 'blocked')) {
+      this.toastr.info('可执行批次已完成，存在被语言依赖阻断的渠道。', '预演完成');
+    } else {
+      this.toastr.success('所有批次均已生成模拟发送成功记录。', '预演完成');
+    }
+  }
+
+  resetRehearsalResults(): void {
+    if (this.rehearsalRunning) return;
+    const state = clone(this.rehearsal);
+    state.batches.forEach((batch) => {
+      if (batch.status === 'blocked') return;
+      batch.status = 'pending';
+      batch.sentAt = undefined;
+      batch.failureReason = undefined;
+      batch.attempts = [];
+    });
+    state.events.push({
+      id: uid('rehearsal-event'),
+      type: 'reset',
+      createdAt: new Date().toISOString(),
+      message: '已手动清空发送结果；阻断原因仍依据当前翻译和渠道依赖重新展示。'
+    });
+    this.syncRehearsal(state);
+    this.toastr.info('可重新开始预演。', '结果已清空');
+  }
+
+  rebuildFromVersion(version: VersionSnapshot): void {
+    if (this.rehearsalRunning) return;
+    const requiredLocales = version.requiredLocales?.length ? [...version.requiredLocales] : ['zh-CN'];
+    const context: NoticeDraft = {
+      ...this.draft,
+      title: version.title,
+      severity: version.severity,
+      scope: version.scope,
+      eventAt: version.eventAt,
+      effectiveAt: version.effectiveAt,
+      expiresAt: version.expiresAt,
+      channels: [...version.channels],
+      requiredLocales,
+      languages: clone(version.languages),
+      channelLocales: normalizeChannelLocales(version.channels, requiredLocales, version.channelLocales)
+    };
+
+    this.commit((draft) => {
+      draft.rehearsal = buildRehearsalPlan(context, {
+        source: version.id,
+        preserve: version.rehearsal
+      });
+    }, false);
+    this.faultChannels = [];
+    this.activeView = 'rehearsal';
+    this.toastr.info(`已按版本 ${version.version} 的内容重建预演，当前草稿正文不会被覆盖。`, '历史重建');
+  }
+
+  useDraftRehearsal(): void {
+    if (this.rehearsalRunning) return;
+    this.commit((draft) => {
+      const state = buildRehearsalPlan(draft, { source: 'draft', preserve: draft.rehearsal });
+      state.source = 'draft';
+      draft.rehearsal = state;
+    }, false);
   }
 
   undo(): void {
@@ -648,15 +1160,27 @@ export class AppComponent implements OnInit {
     return item.id;
   }
 
-  private commit(mutator: (draft: NoticeDraft) => void): void {
+  private commit(mutator: (draft: NoticeDraft) => void, rebuildRehearsal = true): void {
     this.history.push(clone(this.draft));
     if (this.history.length > 50) this.history.shift();
     const next = clone(this.draft);
     mutator(next);
+    next.channelLocales = normalizeChannelLocales(next.channels, next.requiredLocales, next.channelLocales);
+    if (rebuildRehearsal) {
+      const rehearsal = buildRehearsalPlan(next, { source: 'draft', preserve: next.rehearsal });
+      rehearsal.source = 'draft';
+      next.rehearsal = rehearsal;
+    }
     next.updatedAt = new Date().toISOString();
     this.draft = next;
     this.future = [];
     this.persist();
+  }
+
+  private syncRehearsal(state: RehearsalState): void {
+    this.draft = { ...this.draft, rehearsal: clone(state) };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.draft));
+    this.lastSavedAt = this.formatDateTime(new Date().toISOString());
   }
 
   private persist(): void {
@@ -669,6 +1193,10 @@ export class AppComponent implements OnInit {
     value.discussions ??= [];
     value.reviews ??= [];
     value.requiredLocales ??= ['zh-CN'];
+    value.channelLocales = normalizeChannelLocales(value.channels, value.requiredLocales, value.channelLocales);
+    if (!value.rehearsal || !Array.isArray(value.rehearsal.batches)) {
+      value.rehearsal = buildRehearsalPlan(value, { source: 'draft', generatedAt: value.updatedAt });
+    }
     return value;
   }
 
@@ -677,15 +1205,18 @@ export class AppComponent implements OnInit {
   }
 
   private toTime(value: string): number {
-    const time = new Date(value).getTime();
-    return Number.isNaN(time) ? 0 : time;
+    return parseTime(value);
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private diffSentences(left: string[], right: string[]): DiffRow[] {
     const rows: DiffRow[] = [];
     const lcs: number[][] = Array.from({ length: left.length + 1 }, () => Array(right.length + 1).fill(0));
-    for (let i = left.length - 1; i >= 0; i--) {
-      for (let j = right.length - 1; j >= 0; j--) {
+    for (let i = left.length - 1; i >= 0; i -= 1) {
+      for (let j = right.length - 1; j >= 0; j -= 1) {
         lcs[i][j] = left[i] === right[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
       }
     }
@@ -693,13 +1224,13 @@ export class AppComponent implements OnInit {
     let j = 0;
     while (i < left.length || j < right.length) {
       if (i < left.length && j < right.length && left[i] === right[j]) {
-        rows.push({ left: left[i], right: right[j], kind: 'same' }); i++; j++;
+        rows.push({ left: left[i], right: right[j], kind: 'same' }); i += 1; j += 1;
       } else if (i < left.length && j < right.length && lcs[i + 1][j] === lcs[i][j] && lcs[i][j + 1] === lcs[i][j]) {
-        rows.push({ left: left[i], right: right[j], kind: 'changed' }); i++; j++;
+        rows.push({ left: left[i], right: right[j], kind: 'changed' }); i += 1; j += 1;
       } else if (j < right.length && (i === left.length || lcs[i][j + 1] >= lcs[i + 1][j])) {
-        rows.push({ left: '', right: right[j], kind: 'added' }); j++;
+        rows.push({ left: '', right: right[j], kind: 'added' }); j += 1;
       } else if (i < left.length) {
-        rows.push({ left: left[i], right: '', kind: 'removed' }); i++;
+        rows.push({ left: left[i], right: '', kind: 'removed' }); i += 1;
       }
     }
     return rows;

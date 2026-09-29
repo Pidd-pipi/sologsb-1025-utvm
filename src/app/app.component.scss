@@ -17,7 +17,7 @@
 .strip-metrics div { min-width: 88px; padding: 11px 15px; text-align: center; border-radius: 12px; background: rgba(255,255,255,.09); border: 1px solid rgba(255,255,255,.11); }
 .strip-metrics strong { display: block; font-size: 22px; }
 .strip-metrics span { color: #cce0e2; font-size: 11px; }
-.workspace-nav { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 16px 0; }
+.workspace-nav { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin: 16px 0; }
 .workspace-nav button { border: 0; border-radius: 13px; padding: 13px 16px; display: grid; grid-template-columns: 34px 1fr; grid-template-rows: auto auto; text-align: left; color: #58717a; background: #fff; cursor: pointer; transition: transform .16s, box-shadow .16s, background .16s; }
 .workspace-nav button:hover { transform: translateY(-2px); box-shadow: 0 9px 24px rgba(31,77,86,.1); }
 .workspace-nav button.active { color: #fff; background: #235b63; box-shadow: 0 10px 25px rgba(35,91,99,.22); }
@@ -163,8 +163,59 @@ blockquote { margin: 0 0 15px; padding: 15px 18px; border-left: 4px solid #ef835
 .version-summary dl { margin: 0; display: grid; grid-template-columns: auto 1fr; align-content: start; gap: 5px 10px; font-size: 11px; }
 .version-summary dt { color: #89999d; }
 .version-summary dd { margin: 0; color: #4d646c; text-align: right; }
+.rehearsal-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.rehearsal-summary { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.rehearsal-summary article { padding: 16px; border-radius: 14px; background: #fff; box-shadow: 0 7px 22px rgba(30,75,83,.06); }
+.rehearsal-summary span { display: block; color: #7e9096; font-size: 11px; }
+.rehearsal-summary strong { display: block; margin-top: 4px; color: #173e48; font-size: 28px; }
+.rehearsal-summary article.ok strong { color: #2d9572; }
+.rehearsal-summary article.danger strong { color: #c95740; }
+.rehearsal-summary article.blocked strong { color: #c77a24; }
+.rehearsal-layout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px; align-items: start; }
+.lead-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.lead-grid article { padding: 14px; border-radius: 12px; background: #f3f7f7; }
+.lead-grid strong, .lead-grid b { display: block; }
+.lead-grid strong { color: #4e6870; font-size: 12px; }
+.lead-grid b { margin-top: 5px; color: #d87235; font-size: 24px; }
+.lead-grid p { margin: 5px 0 0; color: #839499; font-size: 11px; }
+.channel-header { align-items: flex-start; }
+.channel-header h3 { margin-bottom: 3px; }
+.channel-header p { margin: 0; color: #839499; font-size: 11px; }
+.channel-header-side { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+.fault-toggle { color: #819399; font-size: 11px; }
+.batch-status, .batch-list em { padding: 4px 9px; border-radius: 999px; background: #eef2f2; color: #587078; font-size: 11px; font-style: normal; font-weight: 700; }
+.batch-status.sent, .batch-list article.sent header em { color: #21795c; background: #e1f5ec; }
+.batch-status.failed, .batch-list article.failed header em { color: #b84c38; background: #ffebe6; }
+.batch-status.blocked, .batch-list article.blocked header em { color: #a96317; background: #fff3d8; }
+.batch-status.pending, .batch-list article.pending header em { color: #31687b; background: #e5f2f8; }
+.dependency-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border-radius: 11px; background: #f8fbfb; color: #5f767d; font-size: 12px; font-weight: 700; }
+.dependency-row label { font-weight: 400; }
+.batch-list { display: grid; gap: 9px; margin-top: 12px; }
+.batch-list article { padding: 12px 14px; border: 1px solid #e2eaea; border-left-width: 4px; border-radius: 11px; background: #fcfdfd; }
+.batch-list article.sent { border-left-color: #2d9572; }
+.batch-list article.failed { border-left-color: #cc5b46; }
+.batch-list article.blocked { border-left-color: #dc9c4a; background: #fffdf8; }
+.batch-list article.pending { border-left-color: #5d95b1; }
+.batch-list header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
+.batch-list header b { color: #2d464e; font-size: 13px; }
+.batch-list header span { margin-left: 8px; color: #89999d; font-size: 11px; }
+.batch-list p { margin: 0 0 8px; color: #48616a; font-size: 13px; line-height: 1.7; white-space: pre-wrap; }
+.batch-list footer { display: flex; gap: 14px; flex-wrap: wrap; color: #839499; font-size: 11px; }
+.attempt-log { display: grid; gap: 3px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed #e1e9e9; }
+.attempt-log small { color: #7e9096; font-size: 10px; }
+.rule-list { display: grid; gap: 12px; }
+.rule-list p { margin: 0; color: #5b727a; font-size: 12px; line-height: 1.65; }
+.rule-list strong { display: block; color: #264a53; margin-bottom: 2px; }
+.event-list { display: grid; gap: 10px; max-height: 420px; overflow: auto; }
+.event-list article { display: grid; grid-template-columns: 10px 1fr; gap: 9px; }
+.event-list span { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: #9ab0b6; }
+.event-list span.ok { background: #2d9572; }
+.event-list span.fail { background: #cc5b46; }
+.event-list p { margin: 0; color: #526a72; font-size: 11px; line-height: 1.5; }
+.event-list time { color: #9aa9ad; font-size: 10px; }
+.timeline button { margin-top: 6px; }
 @media (max-width: 1100px) {
-  .view-grid, .check-layout, .review-grid, .version-layout { grid-template-columns: 1fr; }
+  .view-grid, .check-layout, .review-grid, .version-layout, .rehearsal-layout { grid-template-columns: 1fr; }
   .side-column { grid-template-columns: repeat(3, 1fr); }
   .version-layout > aside nb-card { position: static; }
 }
@@ -172,6 +223,7 @@ blockquote { margin: 0 0 15px; padding: 15px 18px; border-left: 4px solid #ef835
   .app-header, .notice-strip, .section-heading { align-items: flex-start; flex-direction: column; }
   .app-shell { padding: 14px; }
   .workspace-nav, .side-column, .form-grid { grid-template-columns: 1fr; }
+  .rehearsal-summary, .lead-grid { grid-template-columns: 1fr; }
   .span-2 { grid-column: auto; }
   .strip-metrics { width: 100%; display: grid; grid-template-columns: repeat(4, 1fr); }
   .strip-metrics div { min-width: 0; padding: 8px; }
